@@ -1,0 +1,39 @@
+name: News Tracker
+
+on:
+  schedule:
+    - cron: "0 * * * *"   # every hour, on the hour (UTC)
+  workflow_dispatch:        # lets us trigger it manually from GitHub's website
+
+permissions:
+  contents: write   # needed so the workflow can save its updated "seen articles" file back to the repo
+
+jobs:
+  check-news:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install required packages
+        run: pip install -r requirements.txt
+
+      - name: Run the news tracker
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python news_fetcher.py
+
+      - name: Save updated "seen articles" list back to the repository
+        run: |
+          git config user.name "news-tracker-bot"
+          git config user.email "actions@github.com"
+          git add seen_articles.json
+          git diff --cached --quiet || git commit -m "Update seen articles"
+          git push

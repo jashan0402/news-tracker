@@ -1,0 +1,340 @@
+"""
+Phase 1 (SSL-fixed): News Fetcher & Categorizer
+"""
+
+import calendar
+import feedparser
+import html
+import json
+import os
+import ssl
+import time
+import certifi
+import requests
+import urllib.request
+from google import genai
+from google.genai import types
+from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
+from dotenv import load_dotenv
+
+# Fixes a common Mac issue where Python can't find trusted security
+# certificates, by explicitly using certifi's up-to-date certificate list.
+_SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+_HTTPS_HANDLER = urllib.request.HTTPSHandler(context=_SSL_CONTEXT)
+
+# Load Telegram/Gemini settings from the .env file that sits next to this
+# script, regardless of which folder the script is run from.
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(_SCRIPT_DIR, ".env"))
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+DIGEST_MODEL = "gemini-3.5-flash-lite"
+
+CEMENT_INDIA_KEYWORDS = [
+    "cement India", "cement price hike India", "cement demand India",
+    "UltraTech Cement", "Ambuja Cement", "Shree Cement", "ACC Limited cement",
+    "Dalmia Bharat cement", "JK Cement", "India Cements", "Nuvoco Vistas",
+]
+
+METALS_COMMODITIES_KEYWORDS = [
+    "aluminium price", "LME aluminium", "steel price global", "copper price",
+    "iron ore price", "coking coal price", "zinc price", "nickel price",
+    "China aluminium demand", "China steel production", "China copper demand",
+    "China metals stimulus", "India aluminium demand", "India steel demand",
+    "India metals import duty", "Hindalco", "NALCO", "Vedanta Aluminium",
+    "Tata Steel", "JSW Steel",
+]
+
+MACRO_KEYWORDS = [
+    "RBI monetary policy", "Federal Reserve interest rate", "crude oil price",
+    "China PMI manufacturing", "China GDP growth", "China property crisis",
+    "China credit data", "India GDP growth", "India inflation CPI",
+    "India IIP industrial production", "India infrastructure spending budget",
+]
+
+EXTRA_FIXED_FEEDS = {
+    "METALS & COMMODITIES (Global, incl. China/India)": [
+        ("Mining.com", "https://www.mining.com/feed/"),
+    ],
+}
+
+SEEN_FILE = "seen_articles.json"
+
+
+def google_news_feed(query, region="US"):
+    locales = {"IN": ("en-IN", "IN"), "US": ("en-US", "US")}
+    hl, gl = locales.get(region, ("en-US", "US"))
+    q = quote(query)
+    return f"https://news.google.com/rss/search?q={q}&hl={hl}&gl={gl}&ceid={gl}:en"
+
+
+def build_feeds():
+    feeds = {
+        "CEMENT (India)": [(kw, google_news_feed(kw, region="IN")) for kw in CEMENT_INDIA_KEYWORDS],
+        "METALS & COMMODITIES (Global, incl. China/India)": [(kw, google_news_feed(kw, region="US")) for kw in METALS_COMMODITIES_KEYWORDS],
+        "MACRO (incl. China/India)": [(kw, google_news_feed(kw, region="US")) for kw in MACRO_KEYWORDS],
+    }
+    for category, extra_sources in EXTRA_FIXED_FEEDS.items():
+        feeds.setdefault(category, []).extend(extra_sources)
+    return feeds
+
+
+def load_seen():
+    if not os.path.exists(SEEN_FILE):
+        return {}
+    with open(SEEN_FILE, "r") as f:
+        data = json.load(f)
+    if isinstance(data, list):
+        # Old format (plain list of links) - migrate to timestamped dict.
+        now = datetime.now(timezone.utc).isoformat()
+        return {link: now for link in data}
+    return data
+
+
+SEEN_RETENTION = timedelta(days=3)
+
+
+def save_seen(seen):
+    cutoff = datetime.now(timezone.utc) - SEEN_RETENTION
+    pruned = {
+        link: seen_at for link, seen_at in seen.items()
+        if datetime.fromisoformat(seen_at) >= cutoff
+    }
+    with open(SEEN_FILE, "w") as f:
+        json.dump(pruned, f)
+
+
+MAX_ARTICLE_AGE = timedelta(hours=24)
+
+
+def is_recent(entry):
+    """Only keep articles actually published within the last 24 hours - Google
+    News search results aren't sorted by recency and often surface old
+    evergreen pages that happen to match a keyword."""
+    parsed_time = entry.get("published_parsed")
+    if not parsed_time:
+        return True  # can't tell the age, so don't filter it out
+    entry_dt = datetime.fromtimestamp(calendar.timegm(parsed_time), tz=timezone.utc)
+    return (datetime.now(timezone.utc) - entry_dt) <= MAX_ARTICLE_AGE
+
+
+def fetch_new_articles(feeds, seen):
+    new_by_category = {}
+    for category, sources in feeds.items():
+        new_items = []
+        for source_name, url in sources:
+            try:
+                parsed = feedparser.parse(url, handlers=[_HTTPS_HANDLER])
+            except Exception as e:
+                print(f"  [ERROR] '{source_name}': crashed - {e}")
+                continue
+
+            raw_count = len(parsed.entries)
+            print(f"  [debug] '{source_name}': entries found={raw_count}")
+
+            for entry in parsed.entries:
+                link = entry.get("link")
+                title = entry.get("title", "(no title)")
+                published = entry.get("published", "")
+                if not link or link in seen:
+                    continue
+                if not is_recent(entry):
+                    continue
+                seen[link] = datetime.now(timezone.utc).isoformat()
+                new_items.append({"source": source_name, "title": title, "link": link, "published": published})
+
+        if new_items:
+            new_by_category[category] = new_items
+    return new_by_category
+
+
+def print_results(new_by_category):
+    if not new_by_category:
+        print("\nNo new articles found this run.")
+        return
+    for category, items in new_by_category.items():
+        print(f"\n=== {category} ({len(items)} new) ===")
+        for item in items:
+            print(f"- [{item['source']}] {item['title']}")
+            print(f"  {item['link']}")
+
+
+def send_telegram_message(text, parse_mode=None):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("  [warn] Telegram not configured (check .env) - skipping alert send.")
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    data = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "disable_web_page_preview": True}
+    if parse_mode:
+        data["parse_mode"] = parse_mode
+    try:
+        resp = requests.post(url, data=data, timeout=10)
+        if not resp.ok:
+            print(f"  [ERROR] Telegram send failed: {resp.status_code} {resp.text}")
+    except Exception as e:
+        print(f"  [ERROR] Telegram send crashed: {e}")
+
+
+def send_telegram_alerts(new_by_category):
+    """Raw fallback: one message per article. Used when no ANTHROPIC_API_KEY is set."""
+    for category, items in new_by_category.items():
+        for item in items:
+            text = f"\U0001F4CC {category}\n{item['title']}\n({item['source']})\n{item['link']}"
+            send_telegram_message(text)
+            time.sleep(0.3)
+
+
+DIGEST_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "groups": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "topic": {
+                        "type": "string",
+                        "description": "Short label for the underlying company/commodity/event, e.g. 'UltraTech Cement Q1 results' or 'Fed holds rates steady'",
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Which of the original categories this belongs to",
+                    },
+                    "importance": {
+                        "type": "string",
+                        "enum": ["high", "medium", "low"],
+                        "description": "How likely this is to be price-moving / decision-relevant for an equity analyst covering metals, cement, and commodities",
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "1-2 plain-English sentences: what happened and why it matters",
+                    },
+                    "article_indices": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Indices (from the numbered input list) of the headlines that belong to this topic",
+                    },
+                },
+                "required": ["topic", "category", "importance", "summary", "article_indices"],
+            },
+        },
+    },
+    "required": ["groups"],
+}
+
+
+def synthesize_digest(new_by_category):
+    """Uses Gemini (free tier) to group scattered headlines into deduplicated, prioritized topics."""
+    flat_items = []
+    for category, items in new_by_category.items():
+        for item in items:
+            flat_items.append({**item, "category": category})
+
+    numbered_list = "\n".join(
+        f"{i}. [{item['category']}] ({item['source']}) {item['title']}"
+        for i, item in enumerate(flat_items)
+    )
+
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    response = client.models.generate_content(
+        model=DIGEST_MODEL,
+        contents=(
+            "You are triaging news headlines for an equity research analyst who covers "
+            "cement (India), metals & commodities (global, with extra focus on China and India), "
+            "and macro news (RBI, US Fed, China PMI/GDP, India GDP/inflation).\n\n"
+            "Below is a numbered list of headlines gathered from many overlapping keyword searches, "
+            "so the same real-world story often appears multiple times under different entries. "
+            "Group them by the actual underlying company/commodity/event (not by which keyword "
+            "matched), merging duplicate coverage of the same story into one group. For each group, "
+            "write a short, plain-English 1-2 sentence summary of what happened and why it matters, "
+            "and rate how likely it is to be price-moving or decision-relevant as high/medium/low.\n\n"
+            f"{numbered_list}"
+        ),
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_json_schema=DIGEST_RESPONSE_SCHEMA,
+        ),
+    )
+
+    data = json.loads(response.text)
+    return data.get("groups", []), flat_items
+
+
+IMPORTANCE_ORDER = {"high": 0, "medium": 1, "low": 2}
+IMPORTANCE_EMOJI = {"high": "\U0001F534", "medium": "\U0001F7E1", "low": "\U000026AA"}
+
+
+def format_digest_messages(groups, flat_items):
+    groups_sorted = sorted(groups, key=lambda g: IMPORTANCE_ORDER.get(g.get("importance", "low"), 2))
+
+    blocks = []
+    for g in groups_sorted:
+        emoji = IMPORTANCE_EMOJI.get(g.get("importance", "low"), "\U000026AA")
+        lines = [
+            f"{emoji} <b>{html.escape(g.get('topic', ''))}</b> ({html.escape(str(g.get('category', '')))})",
+            html.escape(g.get("summary", "").strip()),
+        ]
+        for idx in g.get("article_indices", [])[:3]:
+            if 0 <= idx < len(flat_items):
+                item = flat_items[idx]
+                lines.append(f"- {html.escape(item['source'])}: {html.escape(item['link'])}")
+        blocks.append("\n".join(lines))
+
+    # Pack blocks into messages, staying safely under Telegram's 4096-char limit
+    messages = []
+    current = ""
+    for block in blocks:
+        candidate = (current + "\n\n" + block) if current else block
+        if len(candidate) > 3500:
+            if current:
+                messages.append(current)
+            current = block
+        else:
+            current = candidate
+    if current:
+        messages.append(current)
+    return messages
+
+
+def send_digest_alerts(new_by_category):
+    try:
+        groups, flat_items = synthesize_digest(new_by_category)
+    except Exception as e:
+        print(f"  [ERROR] Digest synthesis crashed: {e} - falling back to raw per-article alerts.")
+        send_telegram_alerts(new_by_category)
+        return
+
+    if not groups:
+        print("  [warn] Digest synthesis returned no groups - falling back to raw per-article alerts.")
+        send_telegram_alerts(new_by_category)
+        return
+
+    messages = format_digest_messages(groups, flat_items)
+    for i, msg in enumerate(messages):
+        if i == 0:
+            header = f"\U0001F4F0 <b>News Digest</b> ({len(flat_items)} new articles → {len(groups)} topics)\n\n"
+        else:
+            header = ""
+        send_telegram_message(header + msg, parse_mode="HTML")
+        time.sleep(0.5)
+
+
+def main():
+    print(f"Checking feeds at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}...\n")
+    feeds = build_feeds()
+    seen = load_seen()
+    new_by_category = fetch_new_articles(feeds, seen)
+    print_results(new_by_category)
+    if new_by_category:
+        if GEMINI_API_KEY:
+            send_digest_alerts(new_by_category)
+        else:
+            print("  [info] GEMINI_API_KEY not set in .env - sending raw per-article alerts instead of a smart digest.")
+            send_telegram_alerts(new_by_category)
+    save_seen(seen)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,5 @@
+feedparser
+certifi
+requests
+python-dotenv
+google-genai
