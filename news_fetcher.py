@@ -4,6 +4,7 @@ Phase 1 (SSL-fixed): News Fetcher & Categorizer
 
 import calendar
 import feedparser
+import hashlib
 import html
 import json
 import os
@@ -61,6 +62,7 @@ EXTRA_FIXED_FEEDS = {
 }
 
 SEEN_FILE = "seen_articles.json"
+PENDING_FILE = "pending_articles.json"
 
 
 def google_news_feed(query, region="US"):
@@ -103,6 +105,31 @@ def save_seen(seen):
         if datetime.fromisoformat(seen_at) >= cutoff
     }
     with open(SEEN_FILE, "w") as f:
+        json.dump(pruned, f)
+
+
+def short_id_for(link):
+    """A compact, stable id for a link, short enough for a Telegram button's callback_data."""
+    return hashlib.md5(link.encode("utf-8")).hexdigest()[:12]
+
+
+def load_pending():
+    if not os.path.exists(PENDING_FILE):
+        return {}
+    with open(PENDING_FILE, "r") as f:
+        return json.load(f)
+
+
+PENDING_RETENTION = timedelta(days=3)
+
+
+def save_pending(pending):
+    cutoff = datetime.now(timezone.utc) - PENDING_RETENTION
+    pruned = {
+        sid: info for sid, info in pending.items()
+        if datetime.fromisoformat(info["added_at"]) >= cutoff
+    }
+    with open(PENDING_FILE, "w") as f:
         json.dump(pruned, f)
 
 
@@ -161,7 +188,7 @@ def print_results(new_by_category):
             print(f"  {item['link']}")
 
 
-def send_telegram_message(text, parse_mode=None):
+def send_telegram_message(text, parse_mode=None, reply_markup=None):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("  [warn] Telegram not configured (check .env) - skipping alert send.")
         return
@@ -169,6 +196,8 @@ def send_telegram_message(text, parse_mode=None):
     data = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "disable_web_page_preview": True}
     if parse_mode:
         data["parse_mode"] = parse_mode
+    if reply_markup:
+        data["reply_markup"] = json.dumps(reply_markup)
     try:
         resp = requests.post(url, data=data, timeout=10)
         if not resp.ok:
@@ -267,35 +296,47 @@ IMPORTANCE_EMOJI = {"high": "\U0001F534", "medium": "\U0001F7E1", "low": "\U0000
 
 
 def format_digest_messages(groups, flat_items):
+    """Returns (messages, new_pending) where messages is a list of (text, buttons)
+    and new_pending maps short_id -> article info for every "Summarize" button created."""
     groups_sorted = sorted(groups, key=lambda g: IMPORTANCE_ORDER.get(g.get("importance", "low"), 2))
+    now = datetime.now(timezone.utc).isoformat()
 
-    blocks = []
+    blocks = []  # list of (text, buttons) per topic group
+    new_pending = {}
     for g in groups_sorted:
         emoji = IMPORTANCE_EMOJI.get(g.get("importance", "low"), "\U000026AA")
         lines = [
             f"{emoji} <b>{html.escape(g.get('topic', ''))}</b> ({html.escape(str(g.get('category', '')))})",
             html.escape(g.get("summary", "").strip()),
         ]
-        for idx in g.get("article_indices", [])[:3]:
+        buttons = []
+        for n, idx in enumerate(g.get("article_indices", [])[:3], start=1):
             if 0 <= idx < len(flat_items):
                 item = flat_items[idx]
-                lines.append(f"- {html.escape(item['source'])}: {html.escape(item['link'])}")
-        blocks.append("\n".join(lines))
+                lines.append(f"{n}. {html.escape(item['source'])}: {html.escape(item['link'])}")
+                sid = short_id_for(item["link"])
+                new_pending[sid] = {
+                    "link": item["link"], "title": item["title"],
+                    "source": item["source"], "added_at": now,
+                }
+                buttons.append([{"text": f"\U0001F4DD Summarize #{n}", "callback_data": sid}])
+        blocks.append(("\n".join(lines), buttons))
 
-    # Pack blocks into messages, staying safely under Telegram's 4096-char limit
+    # Pack blocks into messages, staying safely under Telegram's 4096-char limit.
+    # Buttons only stay attached to the message containing their own block.
     messages = []
-    current = ""
-    for block in blocks:
-        candidate = (current + "\n\n" + block) if current else block
-        if len(candidate) > 3500:
-            if current:
-                messages.append(current)
-            current = block
+    current_text, current_buttons = "", []
+    for text, buttons in blocks:
+        candidate = (current_text + "\n\n" + text) if current_text else text
+        if len(candidate) > 3500 and current_text:
+            messages.append((current_text, current_buttons))
+            current_text, current_buttons = text, list(buttons)
         else:
-            current = candidate
-    if current:
-        messages.append(current)
-    return messages
+            current_text = candidate
+            current_buttons = current_buttons + buttons
+    if current_text:
+        messages.append((current_text, current_buttons))
+    return messages, new_pending
 
 
 def send_digest_alerts(new_by_category):
@@ -311,13 +352,19 @@ def send_digest_alerts(new_by_category):
         send_telegram_alerts(new_by_category)
         return
 
-    messages = format_digest_messages(groups, flat_items)
-    for i, msg in enumerate(messages):
+    messages, new_pending = format_digest_messages(groups, flat_items)
+
+    pending = load_pending()
+    pending.update(new_pending)
+    save_pending(pending)
+
+    for i, (text, buttons) in enumerate(messages):
         if i == 0:
             header = f"\U0001F4F0 <b>News Digest</b> ({len(flat_items)} new articles → {len(groups)} topics)\n\n"
         else:
             header = ""
-        send_telegram_message(header + msg, parse_mode="HTML")
+        reply_markup = {"inline_keyboard": buttons} if buttons else None
+        send_telegram_message(header + text, parse_mode="HTML", reply_markup=reply_markup)
         time.sleep(0.5)
 
 

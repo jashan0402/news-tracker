@@ -1,15 +1,15 @@
-name: News Tracker
+name: Handle Summarize Button Taps
 
 on:
   schedule:
-    - cron: "0 * * * *"   # every hour, on the hour (UTC)
-  workflow_dispatch:        # lets us trigger it manually from GitHub's website
+    - cron: "*/5 * * * *"   # every 5 minutes
+  workflow_dispatch:          # lets us trigger it manually from GitHub's website
 
 permissions:
-  contents: write   # needed so the workflow can save its updated "seen articles" file back to the repo
+  contents: write   # needed so the workflow can save its progress back to the repo
 
 jobs:
-  check-news:
+  handle-likes:
     runs-on: ubuntu-latest
     steps:
       - name: Check out the repository
@@ -23,18 +23,18 @@ jobs:
       - name: Install required packages
         run: pip install -r requirements.txt
 
-      - name: Run the news tracker
+      - name: Check for and process "Summarize" button taps
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python news_fetcher.py
+        run: python handle_likes.py
 
       - name: Save updated state files back to the repository
         run: |
           git config user.name "news-tracker-bot"
           git config user.email "actions@github.com"
-          git add seen_articles.json pending_articles.json
-          git diff --cached --quiet || git commit -m "Update seen/pending articles"
+          git add telegram_offset.json pending_articles.json
+          git diff --cached --quiet || git commit -m "Update Telegram offset"
           git pull --rebase
           git push

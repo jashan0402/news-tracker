@@ -3,3 +3,4 @@ certifi
 requests
 python-dotenv
 google-genai
+trafilatura
