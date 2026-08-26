@@ -21,6 +21,27 @@ export default {
 
     const cq = update.callback_query;
     if (cq) {
+      // Guard against duplicate summaries if the same button is tapped several
+      // times quickly - remember this short_id for 2 minutes using the Worker's
+      // built-in cache (no extra setup needed).
+      const cacheKey = new Request(`https://dedup.internal/${cq.data}`);
+      const cache = caches.default;
+      const alreadySeen = await cache.match(cacheKey);
+
+      if (alreadySeen) {
+        await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            callback_query_id: cq.id,
+            text: "Already on it - one summary coming up.",
+          }),
+        });
+        return new Response("OK", { status: 200 });
+      }
+
+      await cache.put(cacheKey, new Response("1", { headers: { "Cache-Control": "max-age=120" } }));
+
       const ackPromise = fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
