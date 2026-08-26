@@ -1,0 +1,3 @@
+name = "news-tracker-webhook"
+main = "worker.js"
+compatibility_date = "2026-08-01"

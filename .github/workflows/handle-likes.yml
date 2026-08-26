@@ -1,9 +1,9 @@
 name: Handle Summarize Button Taps
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"   # every 5 minutes
-  workflow_dispatch:          # lets us trigger it manually from GitHub's website
+  repository_dispatch:
+    types: [summarize]   # fired instantly by our Cloudflare Worker the moment a button is tapped
+  workflow_dispatch:        # lets us trigger it manually from GitHub's website, for testing
 
 permissions:
   contents: write   # needed so the workflow can save its progress back to the repo
@@ -23,18 +23,20 @@ jobs:
       - name: Install required packages
         run: pip install -r requirements.txt
 
-      - name: Check for and process "Summarize" button taps
+      - name: Process the "Summarize" button tap
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SHORT_ID: ${{ github.event.client_payload.short_id }}
+          CALLBACK_QUERY_ID: ${{ github.event.client_payload.callback_query_id }}
         run: python handle_likes.py
 
       - name: Save updated state files back to the repository
         run: |
           git config user.name "news-tracker-bot"
           git config user.email "actions@github.com"
-          git add telegram_offset.json pending_articles.json
-          git diff --cached --quiet || git commit -m "Update Telegram offset"
+          git add pending_articles.json
+          git diff --cached --quiet || git commit -m "Update pending articles"
           git pull --rebase
           git push

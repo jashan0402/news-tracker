@@ -81,12 +81,12 @@ def summarize_topic(topic, category, articles_with_text):
     combined_sources = "\n\n".join(source_blocks)
 
     content = (
-        f"Write a tight, plain-English gist (2-4 sentences max) of this news topic - "
+        f"Write a plain-English summary (4-6 sentences) of this news topic - "
         f"\"{topic}\" ({category}) - for an equity research analyst covering metals, cement, "
         "and commodities. The sources below all cover the same underlying story - combine them "
-        "into ONE coherent summary of the core facts (what happened, key numbers) and why it "
-        "matters. Don't repeat the same fact separately per source, and don't add opinions beyond "
-        "what's in the sources.\n\n"
+        "into ONE coherent summary. Include the key facts, specific numbers/figures, relevant "
+        "context, and why it matters for the sector/market. Don't repeat the same fact separately "
+        "per source, and don't add opinions beyond what's in the sources.\n\n"
         f"{combined_sources}"
     )
 
@@ -94,7 +94,63 @@ def summarize_topic(topic, category, articles_with_text):
     return response.text.strip()
 
 
+def process_tap(short_id, callback_query_id, pending, already_handled):
+    """Handles one button tap: looks up its topic bundle, fetches every article in
+    it, asks Gemini for one combined summary, and sends it back."""
+    bundle = pending.get(short_id)
+
+    if not bundle or "articles" not in bundle:
+        answer_callback_query(callback_query_id, "Sorry, this topic has expired and can no longer be summarized.")
+        return
+
+    if short_id in already_handled:
+        answer_callback_query(callback_query_id, "Already on it - one summary coming up.")
+        return
+    already_handled.add(short_id)
+
+    articles = bundle["articles"]
+    answer_callback_query(callback_query_id, f"Fetching and summarizing {len(articles)} article(s)...")
+    print(f"Summarizing topic: {bundle['topic']}")
+
+    try:
+        fetched = [{**a, "text": fetch_article_text(a["link"])} for a in articles]
+        summary = summarize_topic(bundle["topic"], bundle["category"], fetched)
+    except Exception as e:
+        print(f"  [ERROR] Summarization crashed: {e}")
+        links = "\n".join(a["link"] for a in articles)
+        nf.send_telegram_message(f"⚠️ Couldn't summarize this topic right now:\n{bundle['topic']}\n{links}")
+        return
+
+    any_text = any(a["text"] for a in fetched)
+    all_text = all(a["text"] for a in fetched)
+    if all_text:
+        note = ""
+    elif any_text:
+        note = "\n\n(Note: full text wasn't accessible for one or more sources; summary combines what could be retrieved.)"
+    else:
+        note = "\n\n(Note: full article text wasn't accessible for any source - summary is based on headlines alone.)"
+
+    nf.send_telegram_message(
+        f"\U0001F4DD <b>Summary</b>: {html.escape(bundle['topic'])} ({html.escape(bundle['category'])})\n\n"
+        f"{html.escape(summary)}{note}",
+        parse_mode="HTML",
+    )
+
+
 def main():
+    pending = nf.load_pending()
+    already_handled = set()  # guards against firing multiple summaries if a button was tapped repeatedly
+
+    # Instant path: Cloudflare Worker dispatched this run for one specific tap.
+    dispatched_short_id = os.environ.get("SHORT_ID")
+    dispatched_cq_id = os.environ.get("CALLBACK_QUERY_ID")
+    if dispatched_short_id and dispatched_cq_id:
+        process_tap(dispatched_short_id, dispatched_cq_id, pending, already_handled)
+        return
+
+    # Fallback path (local testing only): poll Telegram directly for taps.
+    # Note - this won't see anything once a webhook is registered with Telegram,
+    # since a bot can only receive updates one way (webhook OR getUpdates) at a time.
     offset = load_offset()
     updates = get_updates(offset)
 
@@ -102,54 +158,12 @@ def main():
         print("No new button taps.")
         return
 
-    pending = nf.load_pending()
-    already_handled = set()  # guards against firing multiple summaries if a button was tapped repeatedly
-
     for update in updates:
         offset = max(offset, update["update_id"] + 1)
         cq = update.get("callback_query")
         if not cq:
             continue
-
-        short_id = cq.get("data", "")
-        bundle = pending.get(short_id)
-
-        if not bundle or "articles" not in bundle:
-            answer_callback_query(cq["id"], "Sorry, this topic has expired and can no longer be summarized.")
-            continue
-
-        if short_id in already_handled:
-            answer_callback_query(cq["id"], "Already on it - one summary coming up.")
-            continue
-        already_handled.add(short_id)
-
-        articles = bundle["articles"]
-        answer_callback_query(cq["id"], f"Fetching and summarizing {len(articles)} article(s)...")
-        print(f"Summarizing topic: {bundle['topic']}")
-
-        try:
-            fetched = [{**a, "text": fetch_article_text(a["link"])} for a in articles]
-            summary = summarize_topic(bundle["topic"], bundle["category"], fetched)
-        except Exception as e:
-            print(f"  [ERROR] Summarization crashed: {e}")
-            links = "\n".join(a["link"] for a in articles)
-            nf.send_telegram_message(f"⚠️ Couldn't summarize this topic right now:\n{bundle['topic']}\n{links}")
-            continue
-
-        any_text = any(a["text"] for a in fetched)
-        all_text = all(a["text"] for a in fetched)
-        if all_text:
-            note = ""
-        elif any_text:
-            note = "\n\n(Note: full text wasn't accessible for one or more sources; summary combines what could be retrieved.)"
-        else:
-            note = "\n\n(Note: full article text wasn't accessible for any source - summary is based on headlines alone.)"
-
-        nf.send_telegram_message(
-            f"\U0001F4DD <b>Summary</b>: {html.escape(bundle['topic'])} ({html.escape(bundle['category'])})\n\n"
-            f"{html.escape(summary)}{note}",
-            parse_mode="HTML",
-        )
+        process_tap(cq.get("data", ""), cq["id"], pending, already_handled)
 
     save_offset(offset)
 
