@@ -66,24 +66,29 @@ def fetch_article_text(url):
         return None
 
 
-def summarize_article(title, source, article_text):
+def summarize_topic(topic, category, articles_with_text):
+    """articles_with_text: list of {title, source, link, text} - text is None if
+    that particular article couldn't be fetched. Combines all sources covering the
+    same topic into one gist rather than summarizing each article separately."""
     client = genai.Client(api_key=nf.GEMINI_API_KEY)
-    if article_text:
-        content = (
-            "Write a tight, plain-English gist (2-4 sentences max) of this news article for an "
-            "equity research analyst covering metals, cement, and commodities. Just the core facts "
-            "(what happened, key numbers) and why it matters - no padding, no restating the "
-            "headline, no opinions beyond what's in the article.\n\n"
-            f"Title: {title}\nSource: {source}\n\nArticle text:\n{article_text[:8000]}"
-        )
-    else:
-        content = (
-            "The full article text could not be retrieved (paywall or blocked). Based only on "
-            "this headline, write 2-3 plain-English sentences on what this is likely about and "
-            "why an equity research analyst covering metals, cement, and commodities might care, "
-            "making clear this is inferred from the headline alone.\n\n"
-            f"Title: {title}\nSource: {source}"
-        )
+
+    source_blocks = []
+    for a in articles_with_text:
+        if a["text"]:
+            source_blocks.append(f"--- Source: {a['source']} ---\n{a['text'][:6000]}")
+        else:
+            source_blocks.append(f"--- Source: {a['source']} (full text not accessible) ---\nHeadline only: {a['title']}")
+    combined_sources = "\n\n".join(source_blocks)
+
+    content = (
+        f"Write a tight, plain-English gist (2-4 sentences max) of this news topic - "
+        f"\"{topic}\" ({category}) - for an equity research analyst covering metals, cement, "
+        "and commodities. The sources below all cover the same underlying story - combine them "
+        "into ONE coherent summary of the core facts (what happened, key numbers) and why it "
+        "matters. Don't repeat the same fact separately per source, and don't add opinions beyond "
+        "what's in the sources.\n\n"
+        f"{combined_sources}"
+    )
 
     response = client.models.generate_content(model=SUMMARY_MODEL, contents=content)
     return response.text.strip()
@@ -107,10 +112,10 @@ def main():
             continue
 
         short_id = cq.get("data", "")
-        article = pending.get(short_id)
+        bundle = pending.get(short_id)
 
-        if not article:
-            answer_callback_query(cq["id"], "Sorry, this article has expired and can no longer be summarized.")
+        if not bundle or "articles" not in bundle:
+            answer_callback_query(cq["id"], "Sorry, this topic has expired and can no longer be summarized.")
             continue
 
         if short_id in already_handled:
@@ -118,23 +123,31 @@ def main():
             continue
         already_handled.add(short_id)
 
-        answer_callback_query(cq["id"], "Fetching and summarizing the article...")
-        print(f"Summarizing: {article['title']}")
+        articles = bundle["articles"]
+        answer_callback_query(cq["id"], f"Fetching and summarizing {len(articles)} article(s)...")
+        print(f"Summarizing topic: {bundle['topic']}")
 
         try:
-            article_text = fetch_article_text(article["link"])
-            summary = summarize_article(article["title"], article["source"], article_text)
+            fetched = [{**a, "text": fetch_article_text(a["link"])} for a in articles]
+            summary = summarize_topic(bundle["topic"], bundle["category"], fetched)
         except Exception as e:
             print(f"  [ERROR] Summarization crashed: {e}")
-            nf.send_telegram_message(
-                f"⚠️ Couldn't summarize this article right now:\n{article['title']}\n{article['link']}"
-            )
+            links = "\n".join(a["link"] for a in articles)
+            nf.send_telegram_message(f"⚠️ Couldn't summarize this topic right now:\n{bundle['topic']}\n{links}")
             continue
 
-        note = "" if article_text else "\n\n(Note: full article text wasn't accessible - summary is based on the headline alone.)"
+        any_text = any(a["text"] for a in fetched)
+        all_text = all(a["text"] for a in fetched)
+        if all_text:
+            note = ""
+        elif any_text:
+            note = "\n\n(Note: full text wasn't accessible for one or more sources; summary combines what could be retrieved.)"
+        else:
+            note = "\n\n(Note: full article text wasn't accessible for any source - summary is based on headlines alone.)"
+
         nf.send_telegram_message(
-            f"\U0001F4DD <b>Summary</b>: {html.escape(article['title'])}\n"
-            f"({html.escape(article['source'])})\n\n{html.escape(summary)}{note}",
+            f"\U0001F4DD <b>Summary</b>: {html.escape(bundle['topic'])} ({html.escape(bundle['category'])})\n\n"
+            f"{html.escape(summary)}{note}",
             parse_mode="HTML",
         )
 

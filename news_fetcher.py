@@ -296,12 +296,13 @@ IMPORTANCE_EMOJI = {"high": "\U0001F534", "medium": "\U0001F7E1", "low": "\U0000
 
 
 def format_digest_messages(groups, flat_items):
-    """Returns (messages, new_pending) where messages is a list of (text, buttons)
-    and new_pending maps short_id -> article info for every "Summarize" button created."""
+    """Returns (messages, new_pending) where messages is a list of (text, buttons) -
+    one message per topic, each with a single "Summarize this topic" button covering
+    every article in that topic - and new_pending maps short_id -> topic bundle info."""
     groups_sorted = sorted(groups, key=lambda g: IMPORTANCE_ORDER.get(g.get("importance", "low"), 2))
     now = datetime.now(timezone.utc).isoformat()
 
-    blocks = []  # list of (text, buttons) per topic group
+    messages = []
     new_pending = {}
     for g in groups_sorted:
         emoji = IMPORTANCE_EMOJI.get(g.get("importance", "low"), "\U000026AA")
@@ -309,33 +310,23 @@ def format_digest_messages(groups, flat_items):
             f"{emoji} <b>{html.escape(g.get('topic', ''))}</b> ({html.escape(str(g.get('category', '')))})",
             html.escape(g.get("summary", "").strip()),
         ]
-        buttons = []
+        articles = []
         for n, idx in enumerate(g.get("article_indices", [])[:3], start=1):
             if 0 <= idx < len(flat_items):
                 item = flat_items[idx]
                 lines.append(f"{n}. {html.escape(item['source'])}: {html.escape(item['link'])}")
-                sid = short_id_for(item["link"])
-                new_pending[sid] = {
-                    "link": item["link"], "title": item["title"],
-                    "source": item["source"], "added_at": now,
-                }
-                buttons.append([{"text": f"\U0001F4DD Summarize #{n}", "callback_data": sid}])
-        blocks.append(("\n".join(lines), buttons))
+                articles.append({"title": item["title"], "source": item["source"], "link": item["link"]})
 
-    # Pack blocks into messages, staying safely under Telegram's 4096-char limit.
-    # Buttons only stay attached to the message containing their own block.
-    messages = []
-    current_text, current_buttons = "", []
-    for text, buttons in blocks:
-        candidate = (current_text + "\n\n" + text) if current_text else text
-        if len(candidate) > 3500 and current_text:
-            messages.append((current_text, current_buttons))
-            current_text, current_buttons = text, list(buttons)
-        else:
-            current_text = candidate
-            current_buttons = current_buttons + buttons
-    if current_text:
-        messages.append((current_text, current_buttons))
+        buttons = []
+        if articles:
+            sid = short_id_for("|".join(sorted(a["link"] for a in articles)))
+            new_pending[sid] = {
+                "topic": g.get("topic", ""), "category": g.get("category", ""),
+                "articles": articles, "added_at": now,
+            }
+            buttons = [[{"text": "\U0001F4DD Summarize this topic", "callback_data": sid}]]
+
+        messages.append(("\n".join(lines), buttons))
     return messages, new_pending
 
 
@@ -358,13 +349,13 @@ def send_digest_alerts(new_by_category):
     pending.update(new_pending)
     save_pending(pending)
 
-    for i, (text, buttons) in enumerate(messages):
-        if i == 0:
-            header = f"\U0001F4F0 <b>News Digest</b> ({len(flat_items)} new articles → {len(groups)} topics)\n\n"
-        else:
-            header = ""
+    header = f"\U0001F4F0 <b>News Digest</b> ({len(flat_items)} new articles → {len(groups)} topics)"
+    send_telegram_message(header, parse_mode="HTML")
+    time.sleep(0.3)
+
+    for text, buttons in messages:
         reply_markup = {"inline_keyboard": buttons} if buttons else None
-        send_telegram_message(header + text, parse_mode="HTML", reply_markup=reply_markup)
+        send_telegram_message(text, parse_mode="HTML", reply_markup=reply_markup)
         time.sleep(0.5)
 
 
