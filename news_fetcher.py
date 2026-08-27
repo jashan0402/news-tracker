@@ -8,6 +8,7 @@ import hashlib
 import html
 import json
 import os
+import re
 import ssl
 import time
 import certifi
@@ -147,6 +148,16 @@ def is_recent(entry):
     return (datetime.now(timezone.utc) - entry_dt) <= MAX_ARTICLE_AGE
 
 
+def title_fingerprint(title):
+    """A normalized version of a headline, used as a second dedup key alongside
+    the link. Google News gives the same real article a different tracking link
+    depending on which keyword search surfaced it, so link-only dedup lets the
+    identical headline slip through again under a new link - this catches that."""
+    normalized = re.sub(r"[^a-z0-9\s]", "", title.lower())
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return f"title::{normalized}"
+
+
 def fetch_new_articles(feeds, seen):
     new_by_category = {}
     for category, sources in feeds.items():
@@ -169,7 +180,13 @@ def fetch_new_articles(feeds, seen):
                     continue
                 if not is_recent(entry):
                     continue
-                seen[link] = datetime.now(timezone.utc).isoformat()
+                fp = title_fingerprint(title)
+                now = datetime.now(timezone.utc).isoformat()
+                if fp in seen:
+                    seen[link] = now  # remember this link too, so we don't re-evaluate it every run
+                    continue
+                seen[link] = now
+                seen[fp] = now
                 new_items.append({"source": source_name, "title": title, "link": link, "published": published})
 
         if new_items:
