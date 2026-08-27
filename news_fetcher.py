@@ -284,28 +284,43 @@ def synthesize_digest(new_by_category):
     )
 
     client = genai.Client(api_key=GEMINI_API_KEY)
-    response = client.models.generate_content(
-        model=DIGEST_MODEL,
-        contents=(
-            "You are triaging news headlines for an equity research analyst who covers "
-            "cement (India), metals & commodities (global, with extra focus on China and India), "
-            "and macro news (RBI, US Fed, China PMI/GDP, India GDP/inflation).\n\n"
-            "Below is a numbered list of headlines gathered from many overlapping keyword searches, "
-            "so the same real-world story often appears multiple times under different entries. "
-            "Group them by the actual underlying company/commodity/event (not by which keyword "
-            "matched), merging duplicate coverage of the same story into one group. For each group, "
-            "write a short, plain-English 1-2 sentence summary of what happened and why it matters, "
-            "and rate how likely it is to be price-moving or decision-relevant as high/medium/low.\n\n"
-            f"{numbered_list}"
-        ),
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_json_schema=DIGEST_RESPONSE_SCHEMA,
-        ),
+    contents = (
+        "You are triaging news headlines for an equity research analyst who covers "
+        "cement (India), metals & commodities (global, with extra focus on China and India), "
+        "and macro news (RBI, US Fed, China PMI/GDP, India GDP/inflation).\n\n"
+        "Below is a numbered list of headlines gathered from many overlapping keyword searches, "
+        "so the same real-world story often appears multiple times under different entries. "
+        "Group them by the actual underlying company/commodity/event (not by which keyword "
+        "matched), merging duplicate coverage of the same story into one group. For each group, "
+        "write a short, plain-English 1-2 sentence summary of what happened and why it matters, "
+        "and rate how likely it is to be price-moving or decision-relevant as high/medium/low.\n\n"
+        f"{numbered_list}"
     )
 
-    data = json.loads(response.text)
-    return data.get("groups", []), flat_items
+    # Gemini's free-tier flash models occasionally return 503 "high demand" -
+    # retry a couple of times with backoff before giving up, since this is
+    # usually a brief spike rather than a real outage.
+    last_error = None
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model=DIGEST_MODEL,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_json_schema=DIGEST_RESPONSE_SCHEMA,
+                ),
+            )
+            data = json.loads(response.text)
+            return data.get("groups", []), flat_items
+        except Exception as e:
+            last_error = e
+            if attempt < 2:
+                wait = 10 * (attempt + 1)
+                print(f"  [warn] Digest synthesis attempt {attempt + 1} failed ({e}) - retrying in {wait}s...")
+                time.sleep(wait)
+
+    raise last_error
 
 
 IMPORTANCE_ORDER = {"high": 0, "medium": 1, "low": 2}
