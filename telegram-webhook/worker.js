@@ -6,8 +6,71 @@
 
 const GITHUB_REPO = "jashan0402/news-tracker";
 
+function triggerWorkflow(env) {
+  return fetch(`https://api.github.com/repos/${GITHUB_REPO}/actions/workflows/news-tracker.yml/dispatches`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${env.GITHUB_PAT}`,
+      "Accept": "application/vnd.github+json",
+      "User-Agent": "news-tracker-webhook",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ ref: "main" }),
+  });
+}
+
 export default {
   async fetch(request, env) {
+    const url = new URL(request.url);
+
+    // Manual unconditional nudge - always triggers a fresh run.
+    if (url.pathname === "/nudge") {
+      if (url.searchParams.get("token") !== env.TRIGGER_SECRET) {
+        return new Response("Forbidden", { status: 403 });
+      }
+      const resp = await triggerWorkflow(env);
+      return new Response(resp.ok ? "Triggered" : `Failed: ${resp.status}`, { status: resp.ok ? 200 : 502 });
+    }
+
+    // Safety-net endpoint for the hourly cloud routine: does the staleness
+    // check AND the conditional trigger entirely server-side. The routine's
+    // cloud sandbox can't reach api.github.com directly (org-level restriction
+    // unrelated to our setup), so all GitHub API calls happen here instead -
+    // the routine only ever needs to reach this one Worker endpoint.
+    if (url.pathname === "/check-and-nudge") {
+      if (url.searchParams.get("token") !== env.TRIGGER_SECRET) {
+        return new Response("Forbidden", { status: 403 });
+      }
+
+      const listResp = await fetch(
+        `https://api.github.com/repos/${GITHUB_REPO}/actions/workflows/news-tracker.yml/runs?per_page=1`,
+        {
+          headers: {
+            "Authorization": `Bearer ${env.GITHUB_PAT}`,
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "news-tracker-webhook",
+          },
+        }
+      );
+      if (!listResp.ok) {
+        return new Response(`Failed to list runs: ${listResp.status}`, { status: 502 });
+      }
+      const data = await listResp.json();
+      const lastRun = (data.workflow_runs || [])[0];
+      const staleMs = 70 * 60 * 1000;
+      const isStale = !lastRun || (Date.now() - new Date(lastRun.created_at).getTime()) > staleMs;
+
+      if (!isStale) {
+        return new Response(`OK - last run at ${lastRun.created_at}, not stale`, { status: 200 });
+      }
+
+      const dispatchResp = await triggerWorkflow(env);
+      return new Response(
+        dispatchResp.ok ? "Triggered - last run was stale or missing" : `Dispatch failed: ${dispatchResp.status}`,
+        { status: dispatchResp.ok ? 200 : 502 }
+      );
+    }
+
     if (request.method !== "POST") {
       return new Response("OK", { status: 200 });
     }
