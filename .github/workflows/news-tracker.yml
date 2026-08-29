@@ -35,7 +35,7 @@ jobs:
         run: |
           git config user.name "news-tracker-bot"
           git config user.email "actions@github.com"
-          git add seen_articles.json pending_articles.json
+          git add seen_articles.json pending_articles.json recent_topics.json
           git diff --cached --quiet || git commit -m "Update seen/pending articles"
           git pull --rebase
           git push

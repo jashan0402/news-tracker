@@ -38,6 +38,10 @@ CEMENT_INDIA_KEYWORDS = [
     "cement India", "cement price hike India", "cement demand India",
     "UltraTech Cement", "Ambuja Cement", "Shree Cement", "ACC Limited cement",
     "Dalmia Bharat cement", "JK Cement", "India Cements", "Nuvoco Vistas",
+    # Mid/small-cap Indian cement makers
+    "Ramco Cements", "Birla Corporation cement", "Heidelberg Cement India",
+    "Orient Cement", "Star Cement India", "Sagar Cements", "Prism Johnson cement",
+    "JK Lakshmi Cement", "Mangalam Cement", "NCL Industries cement",
 ]
 
 METALS_COMMODITIES_KEYWORDS = [
@@ -47,6 +51,16 @@ METALS_COMMODITIES_KEYWORDS = [
     "China metals stimulus", "India aluminium demand", "India steel demand",
     "India metals import duty", "Hindalco", "NALCO", "Vedanta Aluminium",
     "Tata Steel", "JSW Steel",
+    # Mid/small-cap Indian metals companies
+    "Jindal Steel Power", "SAIL Steel Authority India", "Jindal Stainless",
+    "Hindustan Zinc", "APL Apollo Tubes", "Welspun Corp", "Ratnamani Metals",
+    "Hindustan Copper", "Shyam Metalics", "Sarda Energy Minerals",
+    "Godawari Power", "Usha Martin", "Jindal Saw",
+    # Global large-cap metals & mining companies
+    "Rio Tinto", "BHP Group", "Glencore", "Anglo American mining",
+    "Freeport-McMoRan", "ArcelorMittal", "Alcoa", "Nucor steel", "Vale mining",
+    "Southern Copper", "Norsk Hydro", "POSCO steel", "Nippon Steel",
+    "China Baowu Steel",
 ]
 
 MACRO_KEYWORDS = [
@@ -64,6 +78,7 @@ EXTRA_FIXED_FEEDS = {
 
 SEEN_FILE = "seen_articles.json"
 PENDING_FILE = "pending_articles.json"
+RECENT_TOPICS_FILE = "recent_topics.json"
 
 
 def google_news_feed(query, region="US"):
@@ -131,6 +146,25 @@ def save_pending(pending):
         if datetime.fromisoformat(info["added_at"]) >= cutoff
     }
     with open(PENDING_FILE, "w") as f:
+        json.dump(pruned, f)
+
+
+RECENT_TOPICS_RETENTION = timedelta(hours=48)
+
+
+def load_recent_topics():
+    """Topics already sent in a past digest, so Gemini can avoid re-reporting the
+    same story when a different publisher covers it a few hours later."""
+    if not os.path.exists(RECENT_TOPICS_FILE):
+        return []
+    with open(RECENT_TOPICS_FILE, "r") as f:
+        return json.load(f)
+
+
+def save_recent_topics(topics):
+    cutoff = datetime.now(timezone.utc) - RECENT_TOPICS_RETENTION
+    pruned = [t for t in topics if datetime.fromisoformat(t["added_at"]) >= cutoff]
+    with open(RECENT_TOPICS_FILE, "w") as f:
         json.dump(pruned, f)
 
 
@@ -271,8 +305,12 @@ DIGEST_RESPONSE_SCHEMA = {
 }
 
 
-def synthesize_digest(new_by_category):
-    """Uses Gemini (free tier) to group scattered headlines into deduplicated, prioritized topics."""
+def synthesize_digest(new_by_category, recent_topics):
+    """Uses Gemini (free tier) to group scattered headlines into deduplicated, prioritized topics.
+
+    recent_topics: topics already sent in a previous digest (within the last 48h),
+    so a different outlet re-covering the same story hours later doesn't get
+    reported again as if it were new."""
     flat_items = []
     for category, items in new_by_category.items():
         for item in items:
@@ -282,6 +320,20 @@ def synthesize_digest(new_by_category):
         f"{i}. [{item['category']}] ({item['source']}) {item['title']}"
         for i, item in enumerate(flat_items)
     )
+
+    if recent_topics:
+        recent_block = "\n".join(f"- {t['topic']}: {t['summary']}" for t in recent_topics)
+        recent_instructions = (
+            "\n\nThe analyst was ALREADY sent a digest covering these topics in the last 48 hours "
+            "(listed below as 'topic: summary'). If a headline below is just re-reporting one of these "
+            "same stories with no genuinely new information (e.g. a different outlet covering the same "
+            "results/event/price move), do NOT create a new group for it and do NOT include its index "
+            "anywhere - silently drop it. Only make a new group for it if there's a real update (new "
+            "numbers, a follow-up development, etc.) beyond what was already reported.\n\n"
+            f"Already covered recently:\n{recent_block}"
+        )
+    else:
+        recent_instructions = ""
 
     client = genai.Client(api_key=GEMINI_API_KEY)
     contents = (
@@ -293,7 +345,8 @@ def synthesize_digest(new_by_category):
         "Group them by the actual underlying company/commodity/event (not by which keyword "
         "matched), merging duplicate coverage of the same story into one group. For each group, "
         "write a short, plain-English 1-2 sentence summary of what happened and why it matters, "
-        "and rate how likely it is to be price-moving or decision-relevant as high/medium/low.\n\n"
+        "and rate how likely it is to be price-moving or decision-relevant as high/medium/low."
+        f"{recent_instructions}\n\n"
         f"{numbered_list}"
     )
 
@@ -363,16 +416,22 @@ def format_digest_messages(groups, flat_items):
 
 
 def send_digest_alerts(new_by_category):
+    recent_topics = load_recent_topics()
+
     try:
-        groups, flat_items = synthesize_digest(new_by_category)
+        groups, flat_items = synthesize_digest(new_by_category, recent_topics)
     except Exception as e:
         print(f"  [ERROR] Digest synthesis crashed: {e} - falling back to raw per-article alerts.")
         send_telegram_alerts(new_by_category)
         return
 
     if not groups:
-        print("  [warn] Digest synthesis returned no groups - falling back to raw per-article alerts.")
-        send_telegram_alerts(new_by_category)
+        # A genuinely empty result (as opposed to an exception above) means Gemini
+        # filtered every headline out as a repeat of something already covered
+        # recently - that's a successful outcome, not a failure, so don't fall
+        # back to raw alerts (that would just resurface the exact repeats we're
+        # trying to suppress).
+        print("  [info] Digest synthesis returned no groups - everything was likely a repeat of recently covered topics.")
         return
 
     messages, new_pending = format_digest_messages(groups, flat_items)
@@ -380,6 +439,13 @@ def send_digest_alerts(new_by_category):
     pending = load_pending()
     pending.update(new_pending)
     save_pending(pending)
+
+    now = datetime.now(timezone.utc).isoformat()
+    recent_topics.extend(
+        {"topic": g.get("topic", ""), "summary": g.get("summary", ""), "added_at": now}
+        for g in groups
+    )
+    save_recent_topics(recent_topics)
 
     header = f"\U0001F4F0 <b>News Digest</b> ({len(flat_items)} new articles → {len(groups)} topics)"
     send_telegram_message(header, parse_mode="HTML")
