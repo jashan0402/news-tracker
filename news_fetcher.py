@@ -56,6 +56,11 @@ METALS_COMMODITIES_KEYWORDS = [
     "Hindustan Zinc", "APL Apollo Tubes", "Welspun Corp", "Ratnamani Metals",
     "Hindustan Copper", "Shyam Metalics", "Sarda Energy Minerals",
     "Godawari Power", "Usha Martin", "Jindal Saw",
+    "NMDC", "MOIL manganese", "Coal India", "Vedanta Limited", "Gravita India",
+    "Kirloskar Ferrous Industries", "Maithan Alloys", "Kalyani Steels",
+    "Electrosteel Castings", "Man Industries steel", "Surya Roshni",
+    "Prakash Industries steel", "Sandur Manganese", "Sunflag Iron Steel",
+    "Steel Strips Wheels",
     # Global large-cap metals & mining companies
     "Rio Tinto", "BHP Group", "Glencore", "Anglo American mining",
     "Freeport-McMoRan", "ArcelorMittal", "Alcoa", "Nucor steel", "Vale mining",
