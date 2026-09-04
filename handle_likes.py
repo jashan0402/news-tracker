@@ -94,9 +94,10 @@ def summarize_topic(topic, category, articles_with_text):
     return response.text.strip()
 
 
-def process_tap(short_id, callback_query_id, pending, already_handled):
+def process_tap(short_id, callback_query_id, pending, already_handled, reply_chat_id=None):
     """Handles one button tap: looks up its topic bundle, fetches every article in
-    it, asks Gemini for one combined summary, and sends it back."""
+    it, asks Gemini for one combined summary, and sends it back to whichever chat
+    the button was tapped in (reply_chat_id) rather than broadcasting to everyone."""
     bundle = pending.get(short_id)
 
     if not bundle or "articles" not in bundle:
@@ -118,7 +119,10 @@ def process_tap(short_id, callback_query_id, pending, already_handled):
     except Exception as e:
         print(f"  [ERROR] Summarization crashed: {e}")
         links = "\n".join(a["link"] for a in articles)
-        nf.send_telegram_message(f"⚠️ Couldn't summarize this topic right now:\n{bundle['topic']}\n{links}")
+        nf.send_telegram_message(
+            f"⚠️ Couldn't summarize this topic right now:\n{bundle['topic']}\n{links}",
+            chat_id=reply_chat_id,
+        )
         return
 
     any_text = any(a["text"] for a in fetched)
@@ -134,6 +138,7 @@ def process_tap(short_id, callback_query_id, pending, already_handled):
         f"\U0001F4DD <b>Summary</b>: {html.escape(bundle['topic'])} ({html.escape(bundle['category'])})\n\n"
         f"{html.escape(summary)}{note}",
         parse_mode="HTML",
+        chat_id=reply_chat_id,
     )
 
 
@@ -144,8 +149,9 @@ def main():
     # Instant path: Cloudflare Worker dispatched this run for one specific tap.
     dispatched_short_id = os.environ.get("SHORT_ID")
     dispatched_cq_id = os.environ.get("CALLBACK_QUERY_ID")
+    dispatched_chat_id = os.environ.get("REPLY_CHAT_ID")
     if dispatched_short_id and dispatched_cq_id:
-        process_tap(dispatched_short_id, dispatched_cq_id, pending, already_handled)
+        process_tap(dispatched_short_id, dispatched_cq_id, pending, already_handled, reply_chat_id=dispatched_chat_id)
         return
 
     # Fallback path (local testing only): poll Telegram directly for taps.
@@ -163,7 +169,8 @@ def main():
         cq = update.get("callback_query")
         if not cq:
             continue
-        process_tap(cq.get("data", ""), cq["id"], pending, already_handled)
+        tap_chat_id = str(cq.get("message", {}).get("chat", {}).get("id", "")) or None
+        process_tap(cq.get("data", ""), cq["id"], pending, already_handled, reply_chat_id=tap_chat_id)
 
     save_offset(offset)
 

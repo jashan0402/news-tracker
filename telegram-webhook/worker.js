@@ -127,6 +127,7 @@ export default {
           client_payload: {
             short_id: cq.data,
             callback_query_id: cq.id,
+            chat_id: String(cq.message.chat.id),
           },
         }),
       });

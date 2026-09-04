@@ -31,6 +31,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           SHORT_ID: ${{ github.event.client_payload.short_id }}
           CALLBACK_QUERY_ID: ${{ github.event.client_payload.callback_query_id }}
+          REPLY_CHAT_ID: ${{ github.event.client_payload.chat_id }}
         run: python handle_likes.py
 
       - name: Save updated state files back to the repository

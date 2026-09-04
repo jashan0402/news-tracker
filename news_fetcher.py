@@ -30,7 +30,8 @@ _HTTPS_HANDLER = urllib.request.HTTPSHandler(context=_SSL_CONTEXT)
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(_SCRIPT_DIR, ".env"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+# Supports one or more recipients: TELEGRAM_CHAT_ID=111111 or TELEGRAM_CHAT_ID=111111,222222
+TELEGRAM_CHAT_IDS = [cid.strip() for cid in os.getenv("TELEGRAM_CHAT_ID", "").split(",") if cid.strip()]
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 DIGEST_MODEL = "gemini-3.5-flash-lite"
 
@@ -241,22 +242,26 @@ def print_results(new_by_category):
             print(f"  {item['link']}")
 
 
-def send_telegram_message(text, parse_mode=None, reply_markup=None):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+def send_telegram_message(text, parse_mode=None, reply_markup=None, chat_id=None):
+    """Sends to a specific chat_id if given (e.g. replying to whoever tapped a
+    button), otherwise broadcasts to every configured recipient in TELEGRAM_CHAT_IDS."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_IDS:
         print("  [warn] Telegram not configured (check .env) - skipping alert send.")
         return
+    targets = [chat_id] if chat_id else TELEGRAM_CHAT_IDS
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    data = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "disable_web_page_preview": True}
-    if parse_mode:
-        data["parse_mode"] = parse_mode
-    if reply_markup:
-        data["reply_markup"] = json.dumps(reply_markup)
-    try:
-        resp = requests.post(url, data=data, timeout=10)
-        if not resp.ok:
-            print(f"  [ERROR] Telegram send failed: {resp.status_code} {resp.text}")
-    except Exception as e:
-        print(f"  [ERROR] Telegram send crashed: {e}")
+    for target in targets:
+        data = {"chat_id": target, "text": text, "disable_web_page_preview": True}
+        if parse_mode:
+            data["parse_mode"] = parse_mode
+        if reply_markup:
+            data["reply_markup"] = json.dumps(reply_markup)
+        try:
+            resp = requests.post(url, data=data, timeout=10)
+            if not resp.ok:
+                print(f"  [ERROR] Telegram send failed for {target}: {resp.status_code} {resp.text}")
+        except Exception as e:
+            print(f"  [ERROR] Telegram send crashed for {target}: {e}")
 
 
 def send_telegram_alerts(new_by_category):
