@@ -2,7 +2,9 @@ name: News Tracker
 
 on:
   schedule:
-    - cron: "0 * * * *"   # every hour, on the hour (UTC)
+    # Every 3 hours during 6AM-1AM IST (IST = UTC+5:30), quiet 1AM-6AM IST.
+    # IST 6,9,12,15,18,21,24(midnight) -> UTC 0:30,3:30,6:30,9:30,12:30,15:30,18:30
+    - cron: "30 0,3,6,9,12,15,18 * * *"
   workflow_dispatch:        # lets us trigger it manually from GitHub's website
 
 permissions:

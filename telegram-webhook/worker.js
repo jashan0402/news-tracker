@@ -42,6 +42,15 @@ export default {
         return new Response("Forbidden", { status: 403 });
       }
 
+      // The news check now intentionally goes quiet 1AM-6AM IST - don't treat
+      // that gap as a missed run.
+      const now = new Date();
+      const istMinutes = (now.getUTCHours() * 60 + now.getUTCMinutes() + 330) % 1440;
+      const istHour = Math.floor(istMinutes / 60);
+      if (istHour >= 1 && istHour < 6) {
+        return new Response("Quiet hours (1AM-6AM IST) - no check needed", { status: 200 });
+      }
+
       const listResp = await fetch(
         `https://api.github.com/repos/${GITHUB_REPO}/actions/workflows/news-tracker.yml/runs?per_page=1`,
         {
@@ -57,7 +66,9 @@ export default {
       }
       const data = await listResp.json();
       const lastRun = (data.workflow_runs || [])[0];
-      const staleMs = 70 * 60 * 1000;
+      // Active-hours cadence is now every 3 hours (180 min) - 200 min gives
+      // buffer for scheduling jitter without misfiring between real runs.
+      const staleMs = 200 * 60 * 1000;
       const isStale = !lastRun || (Date.now() - new Date(lastRun.created_at).getTime()) > staleMs;
 
       if (!isStale) {
