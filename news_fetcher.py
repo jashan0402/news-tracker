@@ -59,11 +59,6 @@ METALS_COMMODITIES_KEYWORDS = [
     "Godawari Power", "Usha Martin", "Jindal Saw", "Lloyds Metals",
     "NMDC", "MOIL manganese", "Coal India", "Vedanta Limited", "Gravita India",
     "Sunflag Iron Steel",
-    # Global large-cap metals & mining companies
-    "Rio Tinto", "BHP Group", "Glencore", "Anglo American mining",
-    "Freeport-McMoRan", "ArcelorMittal", "Alcoa", "Nucor steel", "Vale mining",
-    "Southern Copper", "Norsk Hydro", "POSCO steel", "Nippon Steel",
-    "China Baowu Steel",
 ]
 
 MACRO_KEYWORDS = [
